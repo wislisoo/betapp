@@ -517,7 +517,7 @@ async def setup_account(playwright: Playwright, account: Account, stagger: int =
 
     # Verifica se já está logado navegando para GameList (sessão ativa = não redireciona para login)
     try:
-        await page.goto(config.GAMELIST_URL, timeout=config.NAV_TIMEOUT * 1000)
+        await page.goto(config.GAMELIST_URL, timeout=config.NAV_TIMEOUT * 1000, wait_until="domcontentloaded")
         try:
             await page.wait_for_load_state("networkidle", timeout=10_000)
         except Exception:
@@ -541,7 +541,7 @@ async def setup_account(playwright: Playwright, account: Account, stagger: int =
 
     # Navega para GameList, encontra o jogo e clica JOGUE
     try:
-        await page.goto(config.GAMELIST_URL, timeout=config.NAV_TIMEOUT * 1000)
+        await page.goto(config.GAMELIST_URL, timeout=config.NAV_TIMEOUT * 1000, wait_until="domcontentloaded")
         await page.wait_for_load_state("networkidle")
 
         try:
@@ -783,7 +783,7 @@ async def _reenter_game_inner(account_index: int, port: int, account: "Account")
         except Exception:
             pass
 
-        await page.goto(config.GAMELIST_URL, timeout=config.NAV_TIMEOUT * 1000)
+        await page.goto(config.GAMELIST_URL, timeout=config.NAV_TIMEOUT * 1000, wait_until="domcontentloaded")
         await page.wait_for_load_state("networkidle")
 
         try:
@@ -926,7 +926,7 @@ async def rotate_account(account_index: int) -> str | None:
             return None
 
         # Navega para GameList, encontra o jogo e clica JOGUE
-        await page.goto(config.GAMELIST_URL, timeout=config.NAV_TIMEOUT * 1000)
+        await page.goto(config.GAMELIST_URL, timeout=config.NAV_TIMEOUT * 1000, wait_until="domcontentloaded")
         await page.wait_for_load_state("networkidle")
         try:
             close_btn = page.locator(".closeImg")
