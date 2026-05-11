@@ -101,7 +101,9 @@ _limited_renderers:   dict[int, subprocess.Popen] = {}
 _cpulimit_paused_ports: set[int] = set()
 promo_lock            = asyncio.Lock()
 _reenter_sem          = asyncio.Semaphore(3)   # max 3 reenter_game simultâneos
+_restart_sem          = asyncio.Semaphore(2)   # max 2 _restart_chrome simultâneos (evita thundering herd)
 _restarting_accounts: set[int] = set()         # accounts com Chrome sendo reiniciado por memória
+_last_restart_time: dict[int, float] = {}      # timestamp do último restart por conta (evita restart loop)
 _playwright: "Playwright | None" = None
 
 _LAUNCH_URL  = "https://bet.app/api/thirdGame/launchUrl"   # PENDENTE: confirmar endpoint
@@ -1201,34 +1203,44 @@ def _get_chrome_rss(account_index: int) -> int:
 
 
 async def _restart_chrome(account_index: int) -> None:
-    """Mata Chrome, relança na mesma porta e reentra no jogo sem novo login."""
+    """Mata Chrome, relança na mesma porta e reentra no jogo sem novo login.
+    Limitado por _restart_sem (max 2 simultâneos) + cooldown de 30min por conta."""
     if account_index in _restarting_accounts:
         return
+    # Cooldown: não reinicia mesma conta mais de 1x a cada 30 minutos
+    now = asyncio.get_event_loop().time()
+    last = _last_restart_time.get(account_index, 0)
+    if now - last < 1800:
+        log.debug(f"[{account_index:02d}] Restart ignorado — último foi há {(now - last):.0f}s (< 30min)")
+        return
     _restarting_accounts.add(account_index)
-    try:
-        account = active_accounts.get(account_index)
-        if not account:
-            log.error(f"[mem_limiter] [{account_index:02d}] Conta não encontrada")
-            return
-        log.warning(f"[mem_limiter] [{account_index:02d}] Reiniciando Chrome por excesso de RAM...")
-        tab = active_tabs.pop(account_index, None)
-        if tab:
-            try:
-                tab.stop()
-            except Exception:
-                pass
-        account_tokens.pop(account_index, None)
-        await _spawn_chrome(account)
-        port = 9300 + account_index
-        new_token = await _reenter_game_inner(account_index, port, account)
-        if new_token:
-            log.info(f"[mem_limiter] [{account_index:02d}] Reinício OK — {_get_chrome_rss(account_index)}MB RSS")
-        else:
-            log.error(f"[mem_limiter] [{account_index:02d}] Reinício falhou")
-    except Exception as e:
-        log.error(f"[mem_limiter] [{account_index:02d}] _restart_chrome: {e}")
-    finally:
-        _restarting_accounts.discard(account_index)
+    async with _restart_sem:
+        try:
+            account = active_accounts.get(account_index)
+            if not account:
+                log.error(f"[restart] [{account_index:02d}] Conta não encontrada")
+                return
+            log.warning(f"[restart] [{account_index:02d}] Reiniciando Chrome...")
+            tab = active_tabs.pop(account_index, None)
+            if tab:
+                try:
+                    tab.stop()
+                except Exception:
+                    pass
+            account_tokens.pop(account_index, None)
+            await _spawn_chrome(account)
+            port = 9300 + account_index
+            new_token = await _reenter_game_inner(account_index, port, account)
+            _last_restart_time[account_index] = asyncio.get_event_loop().time()
+            if new_token:
+                log.info(f"[restart] [{account_index:02d}] Reinício OK — {_get_chrome_rss(account_index)}MB RSS")
+            else:
+                log.error(f"[restart] [{account_index:02d}] Reinício falhou")
+        except Exception as e:
+            log.error(f"[restart] [{account_index:02d}] _restart_chrome: {e}")
+            _last_restart_time[account_index] = asyncio.get_event_loop().time()
+        finally:
+            _restarting_accounts.discard(account_index)
 
 
 async def _memory_limiter_loop() -> None:
@@ -1292,11 +1304,13 @@ async def _health_monitor_loop() -> None:
             if revived:
                 log.info(f"[health] {revived} conta(s) em recuperação")
             # Reinicia Chrome que passou do tempo máximo de vida (acúmulo GPU/WebGL)
+            # Stagger: cada conta tem + (idx % 4) horas extras, evita thundering herd
             for idx in list(_chrome_start_time.keys()):
                 age_h = (now - _chrome_start_time[idx]) / 3600
-                if age_h >= config.CHROME_MAX_AGE_HOURS:
+                max_h = config.CHROME_MAX_AGE_HOURS + (idx % 4)
+                if age_h >= max_h:
                     if idx not in _restarting_accounts and idx in active_accounts:
-                        log.warning(f"[health] [{idx:02d}] Chrome com {age_h:.1f}h de uptime — reiniciando...")
+                        log.warning(f"[health] [{idx:02d}] Chrome com {age_h:.1f}h de uptime (limite {max_h}h) — reiniciando...")
                         asyncio.create_task(_restart_chrome(idx))
             # Limpa Chrome fantasma (processo morto sem aba ativa)
             for idx in list(_chrome_procs.keys()):
