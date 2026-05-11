@@ -523,13 +523,12 @@ async def setup_account(playwright: Playwright, account: Account, stagger: int =
 
         already_logged = "/login" not in page.url and await _logado_check(page, timeout=5.0)
         if not already_logged:
-            log.info(f"[{account.index:02d}] Iniciando Google OAuth: {account.login}")
-            ok = await _google_login(page, account, account.index)
-            if not ok:
-                log.error(f"[{account.index:02d}] Google OAuth falhou — pulando conta")
-                release_account(account)
-                await browser.close()
-                return
+            # Em VPS headless o Google bloqueia OAuth automatizado — sessão expirada = conta morta
+            log.warning(f"[{account.index:02d}] Sessão expirada (perfil sem cookies válidos) — pulando conta")
+            log.warning(f"[{account.index:02d}] Necessário login manual no navegador real para renovar o perfil")
+            release_account(account)
+            await browser.close()
+            return
         else:
             log.info(f"[{account.index:02d}] Sessão ativa detectada — prosseguindo")
     except Exception as exc:
