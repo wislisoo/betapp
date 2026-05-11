@@ -88,6 +88,7 @@ STEALTH_JS = """
 """
 
 _chrome_procs: dict[int, subprocess.Popen] = {}
+_chrome_start_time: dict[int, float] = {}  # monotonic timestamp de quando o Chrome foi lançado
 
 active_tabs:          dict[int, GameTab]   = {}
 active_accounts:      dict[int, Account]  = {}
@@ -437,6 +438,7 @@ async def _spawn_chrome(account: Account) -> tuple[int, subprocess.Popen]:
 
     proc = subprocess.Popen(args)
     _chrome_procs[account.index] = proc
+    _chrome_start_time[account.index] = asyncio.get_event_loop().time()
 
     # Aguarda Chrome estar pronto
     for _ in range(40):
@@ -1093,8 +1095,7 @@ async def _cpu_limiter_loop() -> None:
         log.warning("[cpu_limiter] psutil não disponível")
         return
 
-    limit = config.CPU_LIMIT_RENDERER
-    log.info(f"[cpu_limiter] Ativo — limite {limit}% CPU por renderer")
+    log.info(f"[cpu_limiter] Ativo — renderer={config.CPU_LIMIT_RENDERER}% | gpu={config.CPU_LIMIT_GPU}%")
 
     while True:
         await asyncio.sleep(5)
@@ -1104,7 +1105,13 @@ async def _cpu_limiter_loop() -> None:
                     if "chrome" not in (proc.info["name"] or "").lower():
                         continue
                     cmdline = proc.info["cmdline"] or []
-                    if "--type=renderer" not in cmdline:
+                    if "--type=renderer" in cmdline:
+                        limit = config.CPU_LIMIT_RENDERER
+                        ptype = "renderer"
+                    elif "--type=gpu-process" in cmdline:
+                        limit = config.CPU_LIMIT_GPU
+                        ptype = "gpu"
+                    else:
                         continue
                     pid = proc.info["pid"]
                     if pid in _limited_renderers:
@@ -1118,7 +1125,7 @@ async def _cpu_limiter_loop() -> None:
                         stderr=subprocess.DEVNULL,
                     )
                     _limited_renderers[pid] = proc_obj
-                    log.info(f"[cpu_limiter] PID {pid} (porta {port}) → {limit}% CPU")
+                    log.info(f"[cpu_limiter] PID {pid} ({ptype}, porta {port}) → {limit}% CPU")
                 except (psutil.NoSuchProcess, psutil.AccessDenied):
                     pass
             # Remove PIDs mortos do tracking
@@ -1136,6 +1143,10 @@ async def _cpu_limiter_loop() -> None:
 def _kill_chrome_tree(port: int) -> None:
     """Mata Chrome + todos os filhos recursivamente pelo porto de debug."""
     import os, signal
+    # Remove tracking de uptime para as portas que serão mortas
+    for idx in list(_chrome_start_time.keys()):
+        if 9300 + idx == port:
+            del _chrome_start_time[idx]
     try:
         import psutil
         for proc in psutil.process_iter(["pid", "name", "cmdline"]):
@@ -1247,8 +1258,10 @@ async def _memory_limiter_loop() -> None:
 
 
 async def _health_monitor_loop() -> None:
-    """Detecta quando perdeu varias contas e reinicia as que morreram."""
+    """Detecta quando perdeu varias contas e reinicia as que morreram.
+    Também reinicia Chrome com mais de CHROME_MAX_AGE_HOURS para evitar acúmulo de GPU."""
     log.info("[health] Monitor ativo — verifica contas a cada 60s")
+    max_age_s = config.CHROME_MAX_AGE_HOURS * 3600
     while True:
         await asyncio.sleep(60)
         try:
@@ -1256,6 +1269,14 @@ async def _health_monitor_loop() -> None:
             total  = len(active_accounts)
             if total == 0:
                 continue
+            now = asyncio.get_event_loop().time()
+            # Reinicia Chrome que passou do tempo máximo de vida (acúmulo GPU/WebGL)
+            for idx in list(_chrome_start_time.keys()):
+                age_h = (now - _chrome_start_time[idx]) / 3600
+                if age_h >= config.CHROME_MAX_AGE_HOURS:
+                    if idx not in _restarting_accounts and idx in active_accounts:
+                        log.warning(f"[health] [{idx:02d}] Chrome com {age_h:.1f}h de uptime — reiniciando...")
+                        asyncio.create_task(_restart_chrome(idx))
             # Quando menos de 30% das contas estão ativas, reinicia as mortas
             if active < total * 0.3:
                 log.warning(f"[health] Só {active}/{total} contas ativas — reiniciando as mortas...")
