@@ -1,0 +1,8 @@
+httpx[http2]
+requests
+playwright
+pychrome
+opencv-python
+numpy
+psutil
+firebase-admin
