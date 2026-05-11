@@ -89,6 +89,7 @@ STEALTH_JS = """
 
 _chrome_procs: dict[int, subprocess.Popen] = {}
 _chrome_start_time: dict[int, float] = {}  # monotonic timestamp de quando o Chrome foi lançado
+_last_active: dict[int, float] = {}  # monotonic timestamp da última vez que a aba estava viva
 
 active_tabs:          dict[int, GameTab]   = {}
 active_accounts:      dict[int, Account]  = {}
@@ -631,6 +632,7 @@ async def setup_account(playwright: Playwright, account: Account, stagger: int =
     log.info(f"[{account.index:02d}] Fluxo visual concluído — sistema pronto")
     active_tabs[account.index]     = game_tab
     active_accounts[account.index] = account
+    _last_active[account.index]    = asyncio.get_event_loop().time()
 
 
 # ---------------------------------------------------------------------------
@@ -835,6 +837,7 @@ async def _reenter_game_inner(account_index: int, port: int, account: "Account")
         if game_tab.token:
             account_tokens[account_index] = game_tab.token
             active_tabs[account_index]    = game_tab
+            _last_active[account_index]   = asyncio.get_event_loop().time()
             if game_tab.api_url:
                 config.API_URL    = game_tab.api_url
                 host   = game_tab.api_url.split("/")[2]
@@ -968,6 +971,7 @@ async def rotate_account(account_index: int) -> str | None:
         if game_tab.token:
             account_tokens[account_index] = game_tab.token
             active_tabs[account_index]    = game_tab
+            _last_active[account_index]   = asyncio.get_event_loop().time()
             if game_tab.api_url:
                 config.API_URL = game_tab.api_url
                 host   = game_tab.api_url.split("/")[2]
@@ -1258,18 +1262,36 @@ async def _memory_limiter_loop() -> None:
 
 
 async def _health_monitor_loop() -> None:
-    """Detecta quando perdeu varias contas e reinicia as que morreram.
-    Também reinicia Chrome com mais de CHROME_MAX_AGE_HOURS para evitar acúmulo de GPU."""
+    """Garante que toda conta conectada se mantenha ativa.
+    - Atualiza _last_active para abas vivas
+    - Reinicia qualquer conta morta há mais de 2 minutos
+    - Reinicia Chrome com mais de CHROME_MAX_AGE_HOURS
+    - Limpa Chrome fantasma (processo morto sem aba)"""
     log.info("[health] Monitor ativo — verifica contas a cada 60s")
     max_age_s = config.CHROME_MAX_AGE_HOURS * 3600
+    REVIVE_DEAD_AFTER = 120  # só tenta reviver após 2min morto (evita conflito com reenter_game)
     while True:
         await asyncio.sleep(60)
         try:
-            active = len(active_tabs)
-            total  = len(active_accounts)
+            total = len(active_accounts)
             if total == 0:
                 continue
             now = asyncio.get_event_loop().time()
+            # Atualiza _last_active para contas vivas
+            for idx in active_tabs:
+                _last_active[idx] = now
+            # Revive qualquer conta morta há mais de 2min (não apenas quando <30%)
+            revived = 0
+            for idx in list(active_accounts.keys()):
+                if idx in active_tabs or idx in _restarting_accounts:
+                    continue
+                dead_s = now - _last_active.get(idx, 0)
+                if dead_s >= REVIVE_DEAD_AFTER:
+                    log.warning(f"[health] [{idx:02d}] Morta há {dead_s:.0f}s — reiniciando...")
+                    asyncio.create_task(_restart_chrome(idx))
+                    revived += 1
+            if revived:
+                log.info(f"[health] {revived} conta(s) em recuperação")
             # Reinicia Chrome que passou do tempo máximo de vida (acúmulo GPU/WebGL)
             for idx in list(_chrome_start_time.keys()):
                 age_h = (now - _chrome_start_time[idx]) / 3600
@@ -1277,19 +1299,11 @@ async def _health_monitor_loop() -> None:
                     if idx not in _restarting_accounts and idx in active_accounts:
                         log.warning(f"[health] [{idx:02d}] Chrome com {age_h:.1f}h de uptime — reiniciando...")
                         asyncio.create_task(_restart_chrome(idx))
-            # Quando menos de 30% das contas estão ativas, reinicia as mortas
-            if active < total * 0.3:
-                log.warning(f"[health] Só {active}/{total} contas ativas — reiniciando as mortas...")
-                for idx in list(active_accounts.keys()):
-                    if idx not in active_tabs and idx not in _restarting_accounts:
-                        log.info(f"[health] Reiniciando conta {idx:02d}...")
-                        asyncio.create_task(_restart_chrome(idx))
             # Limpa Chrome fantasma (processo morto sem aba ativa)
             for idx in list(_chrome_procs.keys()):
                 if idx not in active_tabs and idx not in _restarting_accounts:
                     rss = _get_chrome_rss(idx)
                     if rss == 0:
-                        # Processo já morreu — tenta reiniciar se a conta existe
                         if idx in active_accounts:
                             log.info(f"[health] Chrome {idx:02d} morto — reiniciando...")
                             asyncio.create_task(_restart_chrome(idx))

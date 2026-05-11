@@ -196,12 +196,21 @@ async def _worker(index: int, token: str, account, accounts: dict, rotate_fn=Non
             log.warning(f"[{index:02d}] Sessão morta (37b) — reentrando no jogo...")
             fn = stale_fn or rotate_fn
             if fn:
-                new_token = await fn(index)
-                if new_token:
-                    current_token = new_token
-                    consecutive_invalid = 0
-                    continue
-            await asyncio.sleep(5.0)
+                for retry in range(3):
+                    new_token = await fn(index)
+                    if new_token:
+                        current_token = new_token
+                        consecutive_invalid = 0
+                        log.info(f"[{index:02d}] Reentrada OK (tentativa {retry+1})")
+                        break
+                    backoff = 2 ** retry  # 1s, 2s, 4s
+                    log.warning(f"[{index:02d}] Reentrada falhou ({retry+1}/3) — retry em {backoff}s")
+                    await asyncio.sleep(backoff)
+                else:
+                    log.error(f"[{index:02d}] Reentrada falhou 3x — health monitor assumirá")
+                    break
+            else:
+                await asyncio.sleep(5.0)
 
         elif status == "invalid":
             consecutive_invalid += 1
