@@ -1100,7 +1100,8 @@ async def _cpu_limiter_loop() -> None:
         log.warning("[cpu_limiter] psutil não disponível")
         return
 
-    log.info(f"[cpu_limiter] Ativo — renderer={config.CPU_LIMIT_RENDERER}% | gpu={config.CPU_LIMIT_GPU}%")
+    cpu_limit_browser = getattr(config, "CPU_LIMIT_BROWSER", 25)
+    log.info(f"[cpu_limiter] Ativo — browser={cpu_limit_browser}% | renderer={config.CPU_LIMIT_RENDERER}% | gpu={config.CPU_LIMIT_GPU}%")
 
     while True:
         await asyncio.sleep(5)
@@ -1110,18 +1111,33 @@ async def _cpu_limiter_loop() -> None:
                     if "chrome" not in (proc.info["name"] or "").lower():
                         continue
                     cmdline = proc.info["cmdline"] or []
+                    cmdline_str = " ".join(cmdline)
                     if "--type=renderer" in cmdline:
                         limit = config.CPU_LIMIT_RENDERER
                         ptype = "renderer"
                     elif "--type=gpu-process" in cmdline:
                         limit = config.CPU_LIMIT_GPU
                         ptype = "gpu"
+                    elif "--remote-debugging-port=" in cmdline_str:
+                        # Browser principal: tem porta de debug mas não é renderer/gpu
+                        limit = cpu_limit_browser
+                        ptype = "browser"
                     else:
                         continue
                     pid = proc.info["pid"]
                     if pid in _limited_renderers:
-                        continue
-                    port = _get_renderer_port(pid)
+                        # Verifica se o cpulimit ainda está vivo
+                        cpulimit_proc = _limited_renderers[pid]
+                        if cpulimit_proc.poll() is None:
+                            continue  # ainda vivo
+                        # cpulimit morreu — reaplicar
+                        log.debug(f"[cpu_limiter] cpulimit do PID {pid} morreu — reaplicando")
+                        del _limited_renderers[pid]
+                    # Porta: browser usa próprio cmdline, renderer/gpu usam o pai
+                    if ptype == "browser":
+                        port = next((int(a.split("=", 1)[1]) for a in cmdline if a.startswith("--remote-debugging-port=")), None)
+                    else:
+                        port = _get_renderer_port(pid)
                     if port and port in _cpulimit_paused_ports:
                         continue
                     proc_obj = subprocess.Popen(
@@ -1133,9 +1149,16 @@ async def _cpu_limiter_loop() -> None:
                     log.info(f"[cpu_limiter] PID {pid} ({ptype}, porta {port}) → {limit}% CPU")
                 except (psutil.NoSuchProcess, psutil.AccessDenied):
                     pass
-            # Remove PIDs mortos do tracking
-            dead = {p for p in _limited_renderers if not psutil.pid_exists(p)}
+                except Exception:
+                    pass
+            # Remove PIDs cujo Chrome morreu OU cpulimit morreu
+            dead = {p for p in _limited_renderers
+                    if not psutil.pid_exists(p) or _limited_renderers[p].poll() is not None}
             for p in dead:
+                try:
+                    _limited_renderers[p].kill()
+                except Exception:
+                    pass
                 del _limited_renderers[p]
         except Exception as e:
             log.warning(f"[cpu_limiter] erro: {e}")

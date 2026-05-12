@@ -10,10 +10,11 @@ USE_PROXY        = False   # True = roteia tráfego do jogo pelo WebShare (proxi
 MAX_ACCOUNTS     = 15      # Quantas contas usar (máx. 50 disponíveis)
 LAUNCH_BATCH     = 2      # Quantos browsers abrir por vez (evita pico de RAM)
 HEADLESS_STAGGER = 2      # Segundos entre cada browser no modo headless (reduz pico de CPU)
-CPU_LIMIT_RENDERER = 15   # % de CPU máximo por processo --type=renderer (Linux, via cpulimit)
-CPU_LIMIT_GPU      = 20   # % de CPU máximo por processo --type=gpu-process (Linux, via cpulimit)
+CPU_LIMIT_RENDERER = 10   # % de CPU máximo por processo --type=renderer (Linux, via cpulimit)
+CPU_LIMIT_GPU      = 15   # % de CPU máximo por processo --type=gpu-process (Linux, via cpulimit)
+CPU_LIMIT_BROWSER  = 15   # % de CPU máximo por processo principal do Chrome (sem --type)
 MEMORY_LIMIT_BROWSER_MB = 2000   # MB total (browser + renderers + GPU) por instância Chrome
-CHROME_MAX_AGE_HOURS = 6    # Reinicia Chrome após X horas de uptime (evita acúmulo de GPU/WebGL)
+CHROME_MAX_AGE_HOURS = 4    # Reinicia Chrome após X horas de uptime (evita acúmulo de GPU/WebGL)
 
 # --- Timeouts (segundos) ---
 LOGIN_TIMEOUT    = 30
